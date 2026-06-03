@@ -161,7 +161,7 @@ const styles = StyleSheet.create({
   tabActive: { borderColor: '#4A90D9' },
   tabText: { color: '#FFF', fontWeight: 'bold' },
   form: { paddingHorizontal: 20, gap: 12 },
-  input: { backgroundColor: '#1E1E2E', borderRadius: 12, padding: 14, color: '#FFF', borderWidth: 1, borderColor: '#2E2E4E' },
+  input: { backgroundColor: '#0E1525', borderRadius: 12, padding: 14, color: '#FFF', borderWidth: 1, borderColor: '#2E2E4E' },
   button: { margin: 20, backgroundColor: '#1E3A5F', padding: 16, borderRadius: 12, alignItems: 'center' },
   buttonText: { color: '#4A90D9', fontWeight: 'bold', fontSize: 16 },
 });

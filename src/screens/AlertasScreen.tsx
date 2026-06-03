@@ -80,7 +80,7 @@ export default function AlertasScreen() {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#12121E' },
+  container: { flex: 1, backgroundColor: '#0E1525' },
   center: { flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#12121E' },
   header: { padding: 24, paddingTop: 50, alignItems: 'center' },
   title: { color: '#FFF', fontSize: 26, fontWeight: 'bold' },

@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   View,
   Text,
@@ -9,12 +9,9 @@ import {
   TouchableOpacity,
   Modal,
   Animated,
-  Dimensions,
 } from 'react-native';
 import api from '../services/api';
 import { Sensor, Reservatorio, Alerta } from '../types';
-
-const { width } = Dimensions.get('window');
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 type ModalConfig = {
@@ -22,10 +19,23 @@ type ModalConfig = {
   title: string;
   message: string;
   confirmText?: string;
+  cancelText?: string;
+  showCancel?: boolean;
+  onConfirm?: () => void;
 };
 
-// ─── Sub-components ───────────────────────────────────────────────────────────
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+const randomBetween = (min: number, max: number) =>
+  Math.round(Math.random() * (max - min) + min);
 
+const randomStatus = () => {
+  const r = Math.random();
+  if (r < 0.15) return 'CRITICO';
+  if (r < 0.35) return 'ALERTA';
+  return 'NORMAL';
+};
+
+// ─── SensorRow ────────────────────────────────────────────────────────────────
 const SensorRow: React.FC<{ sensor: Sensor }> = ({ sensor }) => {
   const getStatusColor = (status?: string) => {
     if (!status) return '#4A90D9';
@@ -34,7 +44,6 @@ const SensorRow: React.FC<{ sensor: Sensor }> = ({ sensor }) => {
     if (s === 'ALERTA') return '#F97316';
     return '#4ADE80';
   };
-
   const color = getStatusColor((sensor as any).status);
 
   return (
@@ -44,8 +53,9 @@ const SensorRow: React.FC<{ sensor: Sensor }> = ({ sensor }) => {
         <Text style={sensorStyles.local}>{(sensor as any).localizacao ?? `ID ${sensor.id}`}</Text>
       </View>
       <View style={sensorStyles.right}>
+        {/* ✅ Lê valorAtual primeiro, fallback para ultimaLeitura */}
         <Text style={[sensorStyles.valor, { color }]}>
-          {(sensor as any).ultimaLeitura ?? '—'}
+          {(sensor as any).valorAtual ?? (sensor as any).ultimaLeitura ?? '—'}
         </Text>
         <View style={[sensorStyles.badge, { backgroundColor: color + '22', borderColor: color }]}>
           <Text style={[sensorStyles.badgeText, { color }]}>
@@ -59,31 +69,26 @@ const SensorRow: React.FC<{ sensor: Sensor }> = ({ sensor }) => {
 
 const sensorStyles = StyleSheet.create({
   row: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    backgroundColor: '#0E1525',
-    marginHorizontal: 16,
-    marginBottom: 8,
-    padding: 14,
-    borderRadius: 10,
-    borderLeftWidth: 3,
-    borderWidth: 1,
-    borderColor: '#1A2540',
+    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
+    backgroundColor: '#0E1525', marginHorizontal: 16, marginBottom: 8,
+    padding: 14, borderRadius: 10, borderLeftWidth: 3, borderWidth: 1, borderColor: '#1A2540',
   },
   left: { flex: 1 },
   tipo: { color: '#E2E8F0', fontWeight: '700', fontSize: 14, letterSpacing: 0.3 },
   local: { color: '#4A6080', fontSize: 12, marginTop: 3 },
   right: { alignItems: 'flex-end', gap: 6 },
   valor: { fontSize: 18, fontWeight: '800', letterSpacing: 0.5 },
-  badge: {
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderRadius: 20,
-    borderWidth: 1,
-  },
+  badge: { paddingHorizontal: 8, paddingVertical: 3, borderRadius: 20, borderWidth: 1 },
   badgeText: { fontSize: 10, fontWeight: '700', letterSpacing: 1, textTransform: 'uppercase' },
 });
+
+// ─── EmptyState ───────────────────────────────────────────────────────────────
+const EmptyState: React.FC<{ icon: string; text: string }> = ({ icon, text }) => (
+  <View style={{ padding: 40, alignItems: 'center' }}>
+    <Text style={{ fontSize: 36, marginBottom: 12 }}>{icon}</Text>
+    <Text style={{ color: '#2A3A5A', fontSize: 14, fontWeight: '600' }}>{text}</Text>
+  </View>
+);
 
 // ─── Dashboard ────────────────────────────────────────────────────────────────
 export default function DashboardScreen() {
@@ -92,12 +97,14 @@ export default function DashboardScreen() {
   const [alertas, setAlertas] = useState<Alerta[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  const [modal, setModal] = useState<ModalConfig>({ visible: false, title: '', message: '' });
+  const [simulating, setSimulating] = useState(false);
   const [activeTab, setActiveTab] = useState<'sensores' | 'reservatorios' | 'alertas'>('sensores');
+  const [modal, setModal] = useState<ModalConfig>({ visible: false, title: '', message: '' });
 
-  const pulseAnim = React.useRef(new Animated.Value(1)).current;
+  const pulseAnim = useRef(new Animated.Value(1)).current;
+  const spinAnim = useRef(new Animated.Value(0)).current;
 
-  React.useEffect(() => {
+  useEffect(() => {
     Animated.loop(
       Animated.sequence([
         Animated.timing(pulseAnim, { toValue: 1.12, duration: 1200, useNativeDriver: true }),
@@ -106,6 +113,16 @@ export default function DashboardScreen() {
     ).start();
   }, []);
 
+  const startSpin = () => {
+    spinAnim.setValue(0);
+    Animated.loop(
+      Animated.timing(spinAnim, { toValue: 1, duration: 900, useNativeDriver: true })
+    ).start();
+  };
+  const stopSpin = () => spinAnim.stopAnimation();
+  const spin = spinAnim.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '360deg'] });
+
+  // ── Carregar dados da API ──────────────────────────────────────────────────
   const carregarDados = async () => {
     try {
       const [s, r, a] = await Promise.all([
@@ -116,7 +133,7 @@ export default function DashboardScreen() {
       setSensores(s.data);
       setReservatorios(r.data);
       setAlertas(a.data);
-    } catch (error) {
+    } catch (error: any) {
       setModal({
         visible: true,
         title: '⚠️ Falha de Conexão',
@@ -130,14 +147,76 @@ export default function DashboardScreen() {
   };
 
   useEffect(() => { carregarDados(); }, []);
-
   const onRefresh = () => { setRefreshing(true); carregarDados(); };
 
-  // ── Stats ──
+  // ── Simulação de coleta ────────────────────────────────────────────────────
+  const confirmarSimulacao = () => {
+    setModal({
+      visible: true,
+      title: '🔬 Simular Coleta',
+      message: 'Isso vai gerar leituras aleatórias para todos os sensores, reservatórios e um novo alerta. Continuar?',
+      confirmText: 'Simular',
+      cancelText: 'Cancelar',
+      showCancel: true,
+      onConfirm: executarSimulacao,
+    });
+  };
+
+  const executarSimulacao = async () => {
+    setSimulating(true);
+    startSpin();
+    try {
+      const promisesSensores = sensores.map((s) =>
+        api.post(`/api/sensores/${s.id}/leitura`, {
+          valor: randomBetween(0, 100),
+          unidade: (s as any).unidade ?? 'unit',
+          status: randomStatus(),
+          dataHora: new Date().toISOString(),
+        }).catch(() => null)
+      );
+
+      const promisesReserv = reservatorios.map((r) =>
+        api.patch(`/api/reservatorios/${r.id}`, {
+          nivelAtual: randomBetween(
+            Math.floor(((r as any).capacidadeMaxima ?? 100) * 0.05),
+            (r as any).capacidadeMaxima ?? 100,
+          ),
+        }).catch(() => null)
+      );
+
+      const novoAlerta = api.post('/api/alertas', {
+        titulo: '🔬 Coleta Simulada',
+        descricao: `Coleta de dados simulada em ${new Date().toLocaleString('pt-BR')}`,
+        nivel: randomStatus(),
+        dataHora: new Date().toISOString(),
+      }).catch(() => null);
+
+      await Promise.all([...promisesSensores, ...promisesReserv, novoAlerta]);
+      await carregarDados();
+
+      setModal({
+        visible: true,
+        title: '✅ Simulação Concluída',
+        message: `Dados gerados para ${sensores.length} sensor(es) e ${reservatorios.length} reservatório(s).`,
+        confirmText: 'OK',
+      });
+    } catch (error) {
+      setModal({
+        visible: true,
+        title: '❌ Erro na Simulação',
+        message: 'Não foi possível completar a simulação. Verifique a API.',
+        confirmText: 'OK',
+      });
+    } finally {
+      setSimulating(false);
+      stopSpin();
+    }
+  };
+
+  // ── Stats ──────────────────────────────────────────────────────────────────
   const totalCriticos = sensores.filter(
-    (s) => ((s as any).status ?? '').toUpperCase() === 'CRITICO' || ((s as any).status ?? '').toUpperCase() === 'CRÍTICO'
+    (s) => ['CRITICO', 'CRÍTICO'].includes(((s as any).status ?? '').toUpperCase())
   ).length;
-  const totalAlertas = alertas.length;
   const reservNivel = reservatorios.length
     ? Math.round(
         reservatorios.reduce(
@@ -147,11 +226,12 @@ export default function DashboardScreen() {
       )
     : 0;
 
+  // ── Loading ────────────────────────────────────────────────────────────────
   if (loading) {
     return (
       <View style={styles.loadingContainer}>
         <Animated.View style={{ transform: [{ scale: pulseAnim }] }}>
-          <Text style={styles.loadingMoon}>🌕</Text>
+          <Text style={{ fontSize: 60 }}>🌕</Text>
         </Animated.View>
         <Text style={styles.loadingTitle}>LUNAR BASE</Text>
         <Text style={styles.loadingSubtitle}>Inicializando sistemas...</Text>
@@ -162,18 +242,32 @@ export default function DashboardScreen() {
 
   return (
     <View style={styles.wrapper}>
-      {/* Modal */}
-      <Modal visible={modal.visible} transparent animationType="fade">
+
+      {/* ── Modal ── */}
+      <Modal visible={modal.visible} transparent animationType="fade" onRequestClose={() => setModal(p => ({ ...p, visible: false }))}>
         <View style={styles.modalOverlay}>
           <View style={styles.modalBox}>
             <Text style={styles.modalTitle}>{modal.title}</Text>
             <Text style={styles.modalMessage}>{modal.message}</Text>
-            <TouchableOpacity
-              style={styles.modalBtn}
-              onPress={() => setModal((p) => ({ ...p, visible: false }))}
-            >
-              <Text style={styles.modalBtnText}>{modal.confirmText ?? 'OK'}</Text>
-            </TouchableOpacity>
+            <View style={styles.modalButtons}>
+              {modal.showCancel && (
+                <TouchableOpacity
+                  style={styles.modalBtnCancel}
+                  onPress={() => setModal(p => ({ ...p, visible: false }))}
+                >
+                  <Text style={styles.modalBtnCancelText}>{modal.cancelText ?? 'Cancelar'}</Text>
+                </TouchableOpacity>
+              )}
+              <TouchableOpacity
+                style={styles.modalBtnConfirm}
+                onPress={() => {
+                  setModal(p => ({ ...p, visible: false }));
+                  modal.onConfirm?.();
+                }}
+              >
+                <Text style={styles.modalBtnConfirmText}>{modal.confirmText ?? 'OK'}</Text>
+              </TouchableOpacity>
+            </View>
           </View>
         </View>
       </Modal>
@@ -197,28 +291,22 @@ export default function DashboardScreen() {
             </View>
           </View>
 
-          {/* ── Stat cards ── */}
+          {/* Stat cards */}
           <View style={styles.statsRow}>
-            <View style={[styles.statCard, { borderColor: '#FF444444' }]}>
-              <Text style={[styles.statNum, { color: totalCriticos > 0 ? '#FF4444' : '#4ADE80' }]}>
-                {totalCriticos}
-              </Text>
+            <View style={[styles.statCard, { borderColor: '#FF444433' }]}>
+              <Text style={[styles.statNum, { color: totalCriticos > 0 ? '#FF4444' : '#4ADE80' }]}>{totalCriticos}</Text>
               <Text style={styles.statLabel}>Críticos</Text>
             </View>
-            <View style={[styles.statCard, { borderColor: '#4A90D944' }]}>
+            <View style={[styles.statCard, { borderColor: '#4A90D933' }]}>
               <Text style={[styles.statNum, { color: '#4A90D9' }]}>{sensores.length}</Text>
               <Text style={styles.statLabel}>Sensores</Text>
             </View>
-            <View style={[styles.statCard, { borderColor: '#4ADE8044' }]}>
-              <Text style={[styles.statNum, { color: reservNivel < 30 ? '#FF4444' : '#4ADE80' }]}>
-                {reservNivel}%
-              </Text>
+            <View style={[styles.statCard, { borderColor: '#4ADE8033' }]}>
+              <Text style={[styles.statNum, { color: reservNivel < 30 ? '#FF4444' : '#4ADE80' }]}>{reservNivel}%</Text>
               <Text style={styles.statLabel}>Reservas</Text>
             </View>
-            <View style={[styles.statCard, { borderColor: '#F9731644' }]}>
-              <Text style={[styles.statNum, { color: totalAlertas > 0 ? '#F97316' : '#4ADE80' }]}>
-                {totalAlertas}
-              </Text>
+            <View style={[styles.statCard, { borderColor: '#F9731633' }]}>
+              <Text style={[styles.statNum, { color: alertas.length > 0 ? '#F97316' : '#4ADE80' }]}>{alertas.length}</Text>
               <Text style={styles.statLabel}>Alertas</Text>
             </View>
           </View>
@@ -242,9 +330,7 @@ export default function DashboardScreen() {
         {/* ── Sensores ── */}
         {activeTab === 'sensores' && (
           <View style={styles.section}>
-            <Text style={styles.sectionLabel}>
-              {sensores.length} sensor{sensores.length !== 1 ? 'es' : ''} ativos
-            </Text>
+            <Text style={styles.sectionLabel}>{sensores.length} sensor{sensores.length !== 1 ? 'es' : ''} ativos</Text>
             {sensores.length === 0
               ? <EmptyState icon="🛰️" text="Nenhum sensor registrado" />
               : sensores.map((s) => <SensorRow key={s.id} sensor={s} />)
@@ -269,9 +355,7 @@ export default function DashboardScreen() {
                         <Text style={styles.reservTipo}>{(r as any).tipo ?? 'Reservatório'}</Text>
                         <Text style={[styles.reservPct, { color: barColor }]}>{pct}%</Text>
                       </View>
-                      <Text style={styles.reservDetail}>
-                        {nivel} / {cap} unidades
-                      </Text>
+                      <Text style={styles.reservDetail}>{nivel} / {cap} unidades</Text>
                       <View style={styles.barBg}>
                         <View style={[styles.barFill, { width: `${pct}%` as any, backgroundColor: barColor }]} />
                       </View>
@@ -293,9 +377,8 @@ export default function DashboardScreen() {
               ? <EmptyState icon="✅" text="Nenhum alerta ativo" />
               : alertas.map((a) => {
                   const nivel = ((a as any).nivel ?? (a as any).severidade ?? '').toUpperCase();
-                  const edgeColor = nivel === 'CRITICO' || nivel === 'CRÍTICO' ? '#FF4444'
-                    : nivel === 'ALTO' ? '#F97316'
-                    : '#F59E0B';
+                  const edgeColor = ['CRITICO', 'CRÍTICO'].includes(nivel) ? '#FF4444'
+                    : nivel === 'ALTO' ? '#F97316' : '#F59E0B';
                   return (
                     <View key={a.id} style={[styles.alertCard, { borderLeftColor: edgeColor }]}>
                       <View style={styles.alertHeader}>
@@ -308,9 +391,7 @@ export default function DashboardScreen() {
                       </View>
                       <Text style={styles.alertDesc}>{(a as any).descricao ?? ''}</Text>
                       {(a as any).dataHora && (
-                        <Text style={styles.alertTime}>
-                          🕐 {new Date((a as any).dataHora).toLocaleString('pt-BR')}
-                        </Text>
+                        <Text style={styles.alertTime}>🕐 {new Date((a as any).dataHora).toLocaleString('pt-BR')}</Text>
                       )}
                     </View>
                   );
@@ -319,90 +400,77 @@ export default function DashboardScreen() {
           </View>
         )}
 
-        <View style={{ height: 40 }} />
+        <View style={{ height: 100 }} />
       </ScrollView>
+
+      {/* ── FAB: Simular Coleta ── */}
+      <TouchableOpacity
+        style={[styles.fab, simulating && styles.fabSimulating]}
+        onPress={confirmarSimulacao}
+        disabled={simulating}
+        activeOpacity={0.85}
+      >
+        {simulating ? (
+          <>
+            <Animated.Text style={[styles.fabIcon, { transform: [{ rotate: spin }] }]}>⚙️</Animated.Text>
+            <Text style={[styles.fabText, { color: '#F97316' }]}>Simulando...</Text>
+          </>
+        ) : (
+          <>
+            <Text style={styles.fabIcon}>🔬</Text>
+            <Text style={styles.fabText}>Simular Coleta</Text>
+          </>
+        )}
+      </TouchableOpacity>
+
     </View>
   );
 }
-
-const EmptyState: React.FC<{ icon: string; text: string }> = ({ icon, text }) => (
-  <View style={emptyStyles.container}>
-    <Text style={emptyStyles.icon}>{icon}</Text>
-    <Text style={emptyStyles.text}>{text}</Text>
-  </View>
-);
-
-const emptyStyles = StyleSheet.create({
-  container: { padding: 40, alignItems: 'center' },
-  icon: { fontSize: 36, marginBottom: 12 },
-  text: { color: '#2A3A5A', fontSize: 14, fontWeight: '600' },
-});
 
 // ─── Styles ───────────────────────────────────────────────────────────────────
 const styles = StyleSheet.create({
   wrapper: { flex: 1, backgroundColor: '#080C18' },
   container: { flex: 1 },
 
-  // Loading
   loadingContainer: { flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#080C18' },
-  loadingMoon: { fontSize: 56 },
   loadingTitle: { color: '#4A90D9', fontSize: 22, fontWeight: '800', marginTop: 16, letterSpacing: 4 },
   loadingSubtitle: { color: '#2A4A6A', fontSize: 13, marginTop: 6, letterSpacing: 1 },
 
-  // Header
   header: {
-    backgroundColor: '#0A1020',
-    paddingHorizontal: 20,
-    paddingTop: 52,
-    paddingBottom: 20,
-    borderBottomWidth: 1,
-    borderBottomColor: '#1A2540',
+    backgroundColor: '#0A1020', paddingHorizontal: 20, paddingTop: 52,
+    paddingBottom: 20, borderBottomWidth: 1, borderBottomColor: '#1A2540',
   },
   headerTop: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 20 },
   headerEyebrow: { color: '#2A4A6A', fontSize: 10, letterSpacing: 2, fontWeight: '700', marginBottom: 4 },
   headerTitle: { color: '#E2E8F0', fontSize: 30, fontWeight: '800', letterSpacing: 0.5 },
-  headerSub: { color: '#4A6080', fontSize: 13, marginTop: 4, letterSpacing: 0.5 },
-  onlineBadge: { flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: '#0A2010', borderWidth: 1, borderColor: '#1A4020', paddingHorizontal: 10, paddingVertical: 6, borderRadius: 20 },
+  headerSub: { color: '#4A6080', fontSize: 13, marginTop: 4 },
+  onlineBadge: {
+    flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: '#0A2010',
+    borderWidth: 1, borderColor: '#1A4020', paddingHorizontal: 10, paddingVertical: 6, borderRadius: 20,
+  },
   onlineDot: { width: 7, height: 7, borderRadius: 4, backgroundColor: '#4ADE80' },
   onlineText: { color: '#4ADE80', fontSize: 10, fontWeight: '800', letterSpacing: 1.5 },
 
-  // Stats
   statsRow: { flexDirection: 'row', gap: 8 },
-  statCard: {
-    flex: 1, backgroundColor: '#0E1525', borderWidth: 1, borderRadius: 12,
-    paddingVertical: 12, alignItems: 'center',
-  },
+  statCard: { flex: 1, backgroundColor: '#0E1525', borderWidth: 1, borderRadius: 12, paddingVertical: 12, alignItems: 'center' },
   statNum: { fontSize: 22, fontWeight: '800', letterSpacing: 0.5 },
   statLabel: { color: '#3A5070', fontSize: 10, fontWeight: '600', marginTop: 3, letterSpacing: 0.5, textTransform: 'uppercase' },
 
-  // Tabs
   tabs: {
-    flexDirection: 'row',
-    backgroundColor: '#0A1020',
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    gap: 8,
-    borderBottomWidth: 1,
-    borderBottomColor: '#1A2540',
+    flexDirection: 'row', backgroundColor: '#0A1020', paddingHorizontal: 16,
+    paddingVertical: 12, gap: 8, borderBottomWidth: 1, borderBottomColor: '#1A2540',
   },
   tab: { flex: 1, paddingVertical: 9, borderRadius: 8, alignItems: 'center', backgroundColor: '#0E1525', borderWidth: 1, borderColor: '#1A2540' },
   tabActive: { backgroundColor: '#0D2040', borderColor: '#4A90D9' },
-  tabText: { color: '#3A5070', fontSize: 11, fontWeight: '700', letterSpacing: 0.3 },
+  tabText: { color: '#3A5070', fontSize: 11, fontWeight: '700' },
   tabTextActive: { color: '#4A90D9' },
 
-  // Section
   section: { paddingTop: 16 },
   sectionLabel: { color: '#2A4A6A', fontSize: 11, fontWeight: '700', letterSpacing: 1.5, textTransform: 'uppercase', paddingHorizontal: 20, marginBottom: 10 },
 
-  // Reservatório
   reservCard: {
-    backgroundColor: '#0E1525',
-    marginHorizontal: 16,
-    marginBottom: 10,
-    padding: 16,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: '#1A2540',
+    backgroundColor: '#0E1525', marginHorizontal: 16, marginBottom: 10,
+    padding: 16, borderRadius: 12, borderWidth: 1, borderColor: '#1A2540',
   },
   reservHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 },
   reservTipo: { color: '#E2E8F0', fontWeight: '700', fontSize: 15 },
@@ -412,16 +480,9 @@ const styles = StyleSheet.create({
   barFill: { height: '100%', borderRadius: 3 },
   reservLocal: { color: '#2A4060', fontSize: 11, marginTop: 8 },
 
-  // Alerta
   alertCard: {
-    backgroundColor: '#100D0D',
-    marginHorizontal: 16,
-    marginBottom: 10,
-    padding: 16,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: '#2A1A1A',
-    borderLeftWidth: 4,
+    backgroundColor: '#100D0D', marginHorizontal: 16, marginBottom: 10,
+    padding: 16, borderRadius: 12, borderWidth: 1, borderColor: '#2A1A1A', borderLeftWidth: 4,
   },
   alertHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 },
   alertTitulo: { color: '#E2C8C8', fontWeight: '700', fontSize: 14, flex: 1, marginRight: 8 },
@@ -430,17 +491,28 @@ const styles = StyleSheet.create({
   alertDesc: { color: '#8A7070', fontSize: 13, lineHeight: 19 },
   alertTime: { color: '#4A3030', fontSize: 11, marginTop: 8 },
 
-  // Modal
-  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.8)', justifyContent: 'center', alignItems: 'center' },
+  fab: {
+    position: 'absolute', bottom: 24, right: 20,
+    flexDirection: 'row', alignItems: 'center', gap: 8,
+    backgroundColor: '#0D2040', paddingHorizontal: 22, paddingVertical: 15,
+    borderRadius: 32, borderWidth: 1.5, borderColor: '#4A90D9',
+    elevation: 10,
+    shadowColor: '#4A90D9', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.3, shadowRadius: 12,
+  },
+  fabSimulating: { borderColor: '#F97316', shadowColor: '#F97316' },
+  fabIcon: { fontSize: 18 },
+  fabText: { color: '#4A90D9', fontSize: 14, fontWeight: '800', letterSpacing: 0.5 },
+
+  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.82)', justifyContent: 'center', alignItems: 'center' },
   modalBox: {
     backgroundColor: '#0E1525', borderWidth: 1, borderColor: '#1A2540',
-    borderRadius: 16, padding: 24, width: '82%',
+    borderRadius: 16, padding: 24, width: '84%',
   },
   modalTitle: { color: '#E2E8F0', fontSize: 18, fontWeight: '800', marginBottom: 10 },
-  modalMessage: { color: '#4A6080', fontSize: 14, lineHeight: 21, marginBottom: 22 },
-  modalBtn: {
-    backgroundColor: '#0D2040', borderWidth: 1, borderColor: '#4A90D9',
-    paddingVertical: 12, borderRadius: 10, alignItems: 'center',
-  },
-  modalBtnText: { color: '#4A90D9', fontWeight: '800', fontSize: 14, letterSpacing: 0.5 },
+  modalMessage: { color: '#4A6080', fontSize: 14, lineHeight: 21, marginBottom: 24 },
+  modalButtons: { flexDirection: 'row', justifyContent: 'flex-end', gap: 10 },
+  modalBtnCancel: { paddingHorizontal: 18, paddingVertical: 11, borderRadius: 10, borderWidth: 1, borderColor: '#1A2540' },
+  modalBtnCancelText: { color: '#3A5070', fontWeight: '700' },
+  modalBtnConfirm: { paddingHorizontal: 18, paddingVertical: 11, borderRadius: 10, backgroundColor: '#0D2040', borderWidth: 1, borderColor: '#4A90D9' },
+  modalBtnConfirmText: { color: '#4A90D9', fontWeight: '800', letterSpacing: 0.3 },
 });
